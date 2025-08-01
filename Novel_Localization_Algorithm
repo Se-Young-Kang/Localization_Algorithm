@@ -1,0 +1,339 @@
+# 실내 주차장 환경 구축을 통한 기존 측위 알고리즘 구현 코드
+# WLS 기반 새로운 측위 알고리즘
+import numpy as np
+import itertools
+import matplotlib.pyplot as plt
+
+# Obtain Initial Target Positions using a LS-based Approach
+def estimate_position_ls(beacons, tx_power=-50, path_loss_exponent=2.0):
+    N = len(beacons)
+    # 2차원 위치를 추정하기 위해서는 최소 3개의 비콘이 필요
+    if N < 3:
+        raise ValueError("최소 3개의 비콘이 필요합니다.")
+
+    # 기준 비콘 (첫 번째 비콘 선택)
+    p0 = beacons[0]["pos"]
+    rssi0 = beacons[0]["rssi"]
+    d0 = 10 ** ((tx_power - rssi0) / (10 * path_loss_exponent))
+
+    A = []
+    b = []
+    weights = []
+
+    # 선형 방정식 행렬 구성 및
+    for i in range(1, N):
+        pi = beacons[i]["pos"]
+        rssii = beacons[i]["rssi"]
+        di = 10 ** ((tx_power - rssii) / (10 * path_loss_exponent))
+
+        xi, yi = pi
+        x0, y0 = p0
+
+        A.append([2 * (xi - x0), 2 * (yi - y0)])
+        b.append(d0**2 - di**2 + xi**2 + yi**2 - x0**2 - y0**2)
+
+        weight = 1.0 / (di**2)
+        weights.append(weight)
+
+    A = np.array(A)
+    b = np.array(b)
+    W = np.diag(weights)
+
+    try:
+        # pos_est = np.linalg.lstsq(A, b, rcond=None)[0]
+        AtWA = A.T @ W @ A
+        AtWb = A.T @ W @ b
+        pos_est = np.linalg.inv(AtWA) @ AtWb
+        return pos_est
+    except np.linalg.LinAlgError:
+        return None
+
+# Function for Operating Kalman Filter
+def kalman_filter(state_matrix, letterP, measured_matrix):
+    letterA = np.array([
+        [1,   0.9 * timePlotting, 0,        0],
+        [0,   0.9,      0,        0],
+        [0,   0,        1,   0.9 * timePlotting],
+        [0,   0,        0,      0.9]
+    ])
+    letterH = np.array([
+        [1, 0, 0, 0],
+        [0, 0, 1, 0]
+    ])
+    letterQ = np.identity(4)
+    letterR = np.identity(2) * 50
+
+    predicted = letterA @ state_matrix
+    predicted_letterP = letterA @ letterP @ letterA.T + letterQ
+
+    # Kalman Gain
+    S = letterH @ predicted_letterP @ letterH.T + letterR
+    K = predicted_letterP @ letterH.T @ np.linalg.inv(S)
+
+    # Measurement residual
+    z = np.array([measured_matrix[0], measured_matrix[2]])
+    y = z - (letterH @ predicted)
+
+    # Updated state
+    renewed_estimation = predicted + K @ y
+
+    # Updated error covariance
+    renewed_letterP = predicted_letterP - K @ letterH @ predicted_letterP
+
+    return renewed_estimation, renewed_letterP
+
+# Interpolation Function for Obtaining True Target Position
+def interpolate_path(beacons, path_ids, steps_per_segment):
+    path = []
+    for i in range(len(path_ids) - 1):
+        start = np.array(beacons[path_ids[i]])
+        end = np.array(beacons[path_ids[i+1]])
+        # 선형 보간
+        for t in np.linspace(0, 1, steps_per_segment, endpoint=False):
+            pt = (1 - t) * start + t * end
+            path.append(pt)
+    # 마지막 지점 추가
+    path.append(np.array(beacons[path_ids[-1]]))
+    return np.array(path)
+
+def filter_beacons_by_distance(beacons, target, max_range=20.0):
+    filtered_beacons = []
+    for beacon in beacons:
+        distance = np.linalg.norm(np.append(beacon["pos"],1.2) - target)
+        if distance <= max_range:
+            filtered_beacons.append(beacon)
+    return filtered_beacons
+
+pixel_to_meter = 4.0 / ( 2003 - 1735 )
+
+# Position of bBeacons
+beacons = [
+    {"id": "11011", "pos": np.array([324.0*pixel_to_meter, 2271.*pixel_to_meter])},
+    {"id": "11023", "pos": np.array([324.0*pixel_to_meter, 2003.*pixel_to_meter])},
+    {"id": "11034", "pos": np.array([324.0*pixel_to_meter, 1735.*pixel_to_meter])},
+    {"id": "11044", "pos": np.array([324.0*pixel_to_meter, 1463.*pixel_to_meter])},
+    {"id": "11055", "pos": np.array([324.0*pixel_to_meter, 1197.*pixel_to_meter])},
+    {"id": "11066", "pos": np.array([324.0*pixel_to_meter, 925.0*pixel_to_meter])},
+    {"id": "11077", "pos": np.array([324.0*pixel_to_meter, 656.0*pixel_to_meter])},
+    {"id": "11088", "pos": np.array([324.0*pixel_to_meter, 387.0*pixel_to_meter])},
+
+    {"id": "12111", "pos": np.array([919.0*pixel_to_meter, 2271.*pixel_to_meter])},
+    {"id": "12123", "pos": np.array([919.0*pixel_to_meter, 2003.*pixel_to_meter])},
+    {"id": "12134", "pos": np.array([919.0*pixel_to_meter, 1735.*pixel_to_meter])},
+    {"id": "12144", "pos": np.array([919.0*pixel_to_meter, 1463.*pixel_to_meter])},
+    {"id": "12155", "pos": np.array([919.0*pixel_to_meter, 1197.*pixel_to_meter])},
+    {"id": "12166", "pos": np.array([919.0*pixel_to_meter, 925.0*pixel_to_meter])},
+    {"id": "12188", "pos": np.array([919.0*pixel_to_meter, 387.0*pixel_to_meter])},
+
+    {"id": "12923", "pos": np.array([1243.*pixel_to_meter, 2003.*pixel_to_meter])},
+    {"id": "12966", "pos": np.array([1243.*pixel_to_meter, 925.0*pixel_to_meter])},
+    {"id": "12988", "pos": np.array([1243.*pixel_to_meter, 387.0*pixel_to_meter])},
+
+    {"id": "13823", "pos": np.array([1567.*pixel_to_meter, 2003.*pixel_to_meter])},
+    {"id": "13866", "pos": np.array([1567.*pixel_to_meter, 925.0*pixel_to_meter])},
+    {"id": "13888", "pos": np.array([1567.*pixel_to_meter, 387.0*pixel_to_meter])},
+
+    {"id": "14723", "pos": np.array([1891.*pixel_to_meter, 2003.*pixel_to_meter])},
+    {"id": "14746", "pos": np.array([1891.*pixel_to_meter, 1379.*pixel_to_meter])},
+    {"id": "14766", "pos": np.array([1891.*pixel_to_meter, 925.0*pixel_to_meter])},
+    {"id": "14788", "pos": np.array([1891.*pixel_to_meter, 387.0*pixel_to_meter])},
+
+    {"id": "15631", "pos": np.array([2486.*pixel_to_meter, 1579.*pixel_to_meter])},
+    {"id": "15646", "pos": np.array([2486.*pixel_to_meter, 1379.*pixel_to_meter])},
+    {"id": "15655", "pos": np.array([2486.*pixel_to_meter, 1197.*pixel_to_meter])},
+    {"id": "15666", "pos": np.array([2486.*pixel_to_meter, 925.0*pixel_to_meter])},
+    {"id": "15677", "pos": np.array([2486.*pixel_to_meter, 656.0*pixel_to_meter])},
+    {"id": "15688", "pos": np.array([2486.*pixel_to_meter, 387.0*pixel_to_meter])},
+
+    {"id": "16666", "pos": np.array([3081.*pixel_to_meter, 925.0*pixel_to_meter])},
+    {"id": "16688", "pos": np.array([3081.*pixel_to_meter, 387.0*pixel_to_meter])},
+
+    {"id": "17666", "pos": np.array([3676.*pixel_to_meter, 925.0*pixel_to_meter])},
+    {"id": "17677", "pos": np.array([3676.*pixel_to_meter, 656.0*pixel_to_meter])},
+    {"id": "17688", "pos": np.array([3676.*pixel_to_meter, 387.0*pixel_to_meter])},
+]
+
+# Car path through beacons
+car_path_ids = [
+    "15646", "15631", "14723", "13823", "12923", "12123",
+    "12134", "12144", "12155", "12166", "12966", "13866",
+    "14766", "15666", "16666", "17666", "17677", "17688"
+]
+
+beacon_dict = {b["id"]: b["pos"] for b in beacons}
+
+target = interpolate_path(beacon_dict, car_path_ids, steps_per_segment=5)
+
+RMSE = []
+RMSE_Titer = 100
+for RMSE_iter in range(RMSE_Titer):
+  
+  latest_positions = []
+  for idx_car in range(len(target)):
+
+    # Initial Parameters Setting
+    init = 0.0
+    timeCounter = 0.0
+    latestVar = np.array([1.0, 1.0])
+    state_matrix = np.zeros(4)
+    latest_position = np.zeros(2)
+    latest_KF = np.zeros(2)
+
+    sensitivity = 0.018
+    timePlotting = 1.0
+    width = 3551
+    height = 2406
+
+    letterP = np.array([
+            [100, 0, 0, 0],
+            [0, 100, 0, 0],
+            [0, 0, 100, 0],
+            [0, 0, 0, 100]
+        ])
+
+    iters = 15
+    for iter in range(iters):
+    
+      # Path-Loss Model for RSSI Generation
+      tx_power = -50  # dBm at 1m
+      path_loss_exponent = 2.0
+      noise_std = 2.0
+
+      for beacon in beacons:
+          dist = np.linalg.norm(np.append(beacon["pos"],1.2) - np.append(target[idx_car],0))
+          rssi = tx_power - 10 * path_loss_exponent * np.log10(dist)
+          noisy_rssi = rssi + np.random.normal(0, noise_std)
+          beacon["rssi"] = noisy_rssi
+
+      # Select beacons that are within a certain distance of the target.
+      filter_beacons = filter_beacons_by_distance(beacons, np.append(target[idx_car],0), max_range=20.0)
+
+      # Sort RSSI
+      beacons_sorted = sorted(filter_beacons, key=lambda x: x["rssi"], reverse=True)
+      
+      # Combination for Sorted RSSI
+      pairs = list(itertools.combinations(beacons_sorted, 2))
+
+      # LS 위치 추정
+      temp_position = []
+      combinations = list(itertools.combinations(beacons_sorted, len(beacons_sorted)-1))
+      for combo in combinations:
+        temp_position.append(estimate_position_ls(combo, tx_power=-50, path_loss_exponent=2.0))
+
+      if len(np.vstack(temp_position)) > 0:
+        absPos = np.vstack(temp_position)
+        sample_average = np.mean(absPos, axis=0)
+        sample_variance = np.var(absPos, axis=0, ddof=1)
+
+        sample_length = len(absPos)
+        if init > 0:
+          temp_average = np.array([latest_position[0], latest_position[1]])
+        else:
+          temp_average = np.array([sample_average[0], sample_average[1]])
+
+        temp_variance = np.array([
+            (width * sensitivity) ** 2,
+            (height * sensitivity) ** 2
+        ])
+
+        # if the variance is 0, replace it with 1
+        sample_variance[0] = sample_variance[0] if sample_variance[0] != 0 else 1.0
+        sample_variance[1] = sample_variance[1] if sample_variance[1] != 0 else 1.0
+
+        # average update
+        temp_average[0] = (
+            sample_variance[0] * temp_average[0] / (sample_length * temp_variance[0] + sample_variance[0]) +
+            (sample_length * temp_variance[0]) * sample_average[0] / (sample_length * temp_variance[0] + sample_variance[0])
+        )
+        temp_average[1] = (
+            sample_variance[1] * temp_average[1] / (sample_length * temp_variance[1] + sample_variance[1]) +
+            (sample_length * temp_variance[1]) * sample_average[1] / (sample_length * temp_variance[1] + sample_variance[1])
+        )
+
+        # variance update
+        temp_variance[0] = 1. / (1. / temp_variance[0] + sample_length / sample_variance[0])
+        temp_variance[1] = 1. / (1. / temp_variance[1] + sample_length / sample_variance[1])
+
+        hyperMu = temp_average
+        hyperVar = temp_variance
+
+        if init > 0:
+          buf_M = np.array([
+              hyperMu[0],
+              (hyperMu[0] - latest_KF[0]) / timePlotting,
+              hyperMu[1],
+              (hyperMu[1] - latest_KF[1]) / timePlotting
+          ])
+          measured_matrix = buf_M
+
+          if init == 1:
+              state_matrix = buf_M
+              latest_position = hyperMu
+              init = 2
+          else:
+              state_matrix, letterP = kalman_filter(state_matrix, letterP, measured_matrix)
+              latest_position = np.array([state_matrix[0], state_matrix[2]])
+        else:
+          buf_m = np.array([
+              hyperMu[0],
+              0.0,
+              hyperMu[1],
+              0.0
+          ])
+          measured_matrix = buf_m
+          state_matrix = buf_m
+          latest_position = hyperMu
+          latest_var = hyperVar
+          init = 1.0
+          timeCounter = 1.0
+
+        latest_KF = hyperMu
+        latest_var = hyperVar
+      elif init > 1:
+          hyperMu = latest_position
+          hyperVar = latest_var
+
+          buf_M = np.array([
+              hyperMu[0],
+              (hyperMu[0] - latest_KF[0]) / timePlotting,
+              hyperMu[1],
+              (hyperMu[1] - latest_KF[1]) / timePlotting
+          ])
+
+          measured_matrix = buf_M
+          state_matrix, letterP = kalman_filter(state_matrix, letterP, measured_matrix)
+          latest_position = np.array([state_matrix[0], state_matrix[2]])
+          timeCounter += timePlotting
+
+      elif init > 0:
+        timeCounter += timePlotting
+
+    latest_positions.append(latest_position)
+    RMSE.append(np.linalg.norm(latest_position - target[idx_car]))
+
+print(np.sum(RMSE)/(RMSE_Titer*len(target)))
+
+# Plot
+plt.figure(figsize=(9, 6))
+for beacon_id, pos in beacon_dict.items():
+    plt.scatter(*pos, c="blue", s=50)
+    plt.text(pos[0] + 0.2, pos[1], beacon_id, fontsize=8)
+
+for i in range(len(car_path_ids) - 1):
+    start = beacon_dict[car_path_ids[i]]
+    end = beacon_dict[car_path_ids[i + 1]]
+    dx, dy = end - start
+    plt.arrow(start[0], start[1], dx, dy,
+              length_includes_head=True, head_width=0.5, head_length=1.0, fc='black', ec='black')
+
+for est_tar in latest_positions:
+    plt.scatter(*est_tar, c="red",  marker='X', s=30)
+
+for true_tar in target:
+    plt.scatter(*true_tar, c="black",  marker='X', s=30)
+
+plt.xlabel("X (meters)")
+plt.ylabel("Y (meters)")
+plt.grid(True)
+plt.axis("equal")
+plt.show()
