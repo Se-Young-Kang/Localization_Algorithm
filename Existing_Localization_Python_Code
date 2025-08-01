@@ -1,50 +1,41 @@
-# 실내 주차장 환경 구축을 통한 새로운 측위 알고리즘 구현 코드
+# 실내 주차장 환경 구축을 통한 기존 측위 알고리즘 구현 코드
+# 아폴로니우스 원 기반의 측위 알고리즘
 import numpy as np
 import itertools
 import matplotlib.pyplot as plt
 
-def estimate_position_ls(beacons, tx_power=-50, path_loss_exponent=2.0):
-    N = len(beacons)
-    if N < 3:
-        raise ValueError("최소 3개의 비콘이 필요합니다.")
-
-    # 기준 비콘 (첫 번째 비콘 선택)
-    p0 = beacons[0]["pos"]
-    rssi0 = beacons[0]["rssi"]
-    d0 = 10 ** ((tx_power - rssi0) / (10 * path_loss_exponent))
-
-    A = []
-    b = []
-    weights = []
-
-    for i in range(1, N):
-        pi = beacons[i]["pos"]
-        rssii = beacons[i]["rssi"]
-        di = 10 ** ((tx_power - rssii) / (10 * path_loss_exponent))
-
-        xi, yi = pi
-        x0, y0 = p0
-
-        A.append([2 * (xi - x0), 2 * (yi - y0)])
-        b.append(d0**2 - di**2 + xi**2 + yi**2 - x0**2 - y0**2)
-
-        weight = 1.0 / (dist**2)
-        weights.append(weight)
-
-    A = np.array(A)
-    b = np.array(b)
-    W = np.diag(weights)
-
-    try:
-        # pos_est = np.linalg.lstsq(A, b, rcond=None)[0]
-        AtWA = A.T @ W @ A
-        AtWb = A.T @ W @ b
-        pos_est = np.linalg.inv(AtWA) @ AtWb
-        return pos_est
-    except np.linalg.LinAlgError:
-        return None
-
 # Function for Obtaining Temporal Target Position
+def apollo_sphere(delta_rssi, direction_vector):
+    h = 1.2
+    ratio = 10 ** (-delta_rssi / 20)
+    l = 1 / (1 - ratio**2)
+    a, b = direction_vector
+
+    results = []
+    if 10 ** (-5 / 20) < ratio < 10 ** (5 / 20):
+        if a != 0 or b != 0:
+            midpoint = np.array([a / 2, b / 2])
+            results.append(midpoint)
+            results.append(midpoint)
+            return results
+
+    term_x = a**2 * l**2 - a**2 * l - b**2 * l - h**2
+    term_y = b**2 * l**2 - a**2 * l - b**2 * l - h**2
+
+    if term_x < 0 or term_y < 0:
+        results.append(np.array([a * l, b * l]))
+        results.append(np.array([a * l, b * l]))
+        return results
+
+    x1 = np.array([a * l + np.sqrt(term_x), 0.0])
+    x2 = np.array([a * l - np.sqrt(term_x), 0.0])
+    y1 = np.array([0.0, b * l - np.sqrt(term_y)])
+    y2 = np.array([0.0, b * l + np.sqrt(term_y)])
+
+    results.extend([x1, x2, y1, y2])
+    return results
+
+# Function for Operating Kalman Filter
 def kalman_filter(state_matrix, letterP, measured_matrix):
     letterA = np.array([
         [1,   0.9 * timePlotting, 0,        0],
@@ -78,7 +69,7 @@ def kalman_filter(state_matrix, letterP, measured_matrix):
 
     return renewed_estimation, renewed_letterP
 
-# Interpolation Function for Car Path
+# Interpolation Function for Obtaining True Target Position
 def interpolate_path(beacons, path_ids, steps_per_segment):
     path = []
     for i in range(len(path_ids) - 1):
@@ -102,7 +93,7 @@ def filter_beacons_by_distance(beacons, target, max_range=20.0):
 
 pixel_to_meter = 4.0 / ( 2003 - 1735 )
 
-# Pixel based Position
+# Position of bBeacons
 beacons = [
     {"id": "11011", "pos": np.array([324.0*pixel_to_meter, 2271.*pixel_to_meter])},
     {"id": "11023", "pos": np.array([324.0*pixel_to_meter, 2003.*pixel_to_meter])},
@@ -163,11 +154,11 @@ target = interpolate_path(beacon_dict, car_path_ids, steps_per_segment=5)
 RMSE = []
 RMSE_Titer = 100
 for RMSE_iter in range(RMSE_Titer):
-
+  
   latest_positions = []
   for idx_car in range(len(target)):
 
-    # Initial Parameters
+    # Initial Parameters Setting
     init = 0.0
     timeCounter = 0.0
     latestVar = np.array([1.0, 1.0])
@@ -200,19 +191,27 @@ for RMSE_iter in range(RMSE_Titer):
           rssi = tx_power - 10 * path_loss_exponent * np.log10(dist)
           noisy_rssi = rssi + np.random.normal(0, noise_std)
           beacon["rssi"] = noisy_rssi
-    
+
+      # Select beacons that are within a certain distance of the target.
       filter_beacons = filter_beacons_by_distance(beacons, np.append(target[idx_car],0), max_range=20.0)
 
       # Sort RSSI
       beacons_sorted = sorted(filter_beacons, key=lambda x: x["rssi"], reverse=True)
-      # for b in beacons_sorted:
-      #     print(f"{b['id']}: RSSI = {b['rssi']:.2f} dBm, Position = {b['pos']}")
+      
+      # Combination for Sorted RSSI
+      pairs = list(itertools.combinations(beacons_sorted, 2))
 
-      # LS 위치 추정
+      # Obtain Direction Vector
       temp_position = []
-      combinations = list(itertools.combinations(beacons_sorted, len(beacons_sorted)-1))
-      for combo in combinations:
-        temp_position.append(estimate_position_ls(combo, tx_power=-50, path_loss_exponent=2.0))
+      for i in range(len(beacons_sorted)):
+          for j in range(i + 1, len(beacons_sorted)):
+              b_near = beacons_sorted[i]
+              b_far = beacons_sorted[j]
+              
+              # From near to far
+              direction = b_near["pos"] - b_far["pos"]
+              delta_rssi = b_far["rssi"] - b_near["rssi"]
+              temp_position.append(apollo_sphere(delta_rssi,direction)+b_near["pos"])
 
       if len(np.vstack(temp_position)) > 0:
         absPos = np.vstack(temp_position)
@@ -301,7 +300,7 @@ for RMSE_iter in range(RMSE_Titer):
 
       elif init > 0:
         timeCounter += timePlotting
-    
+
     latest_positions.append(latest_position)
     RMSE.append(np.linalg.norm(latest_position - target[idx_car]))
 
